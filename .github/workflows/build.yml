@@ -1,0 +1,83 @@
+name: Build WDA IPA
+
+# Free alternative to renting a Mac: GitHub's macOS runner compiles
+# WebDriverAgent for you. The output is an UNSIGNED ipa, which you then sign
+# locally with Sideloadly + your Apple ID (7-day cert) and install with go-ios.
+#
+# Why unsigned: signing needs your Apple ID / certificate, which must never be
+# uploaded to a CI runner. Keeping it unsigned also means one build works for
+# any Apple ID.
+
+on:
+  workflow_dispatch:
+    inputs:
+      deployment_target:
+        description: 'Minimum iOS version'
+        required: false
+        default: '15.0'
+      bundle_id:
+        description: 'Runner bundle id (change if you hit a conflict)'
+        required: false
+        default: 'com.relay.wda.xctrunner'
+
+jobs:
+  build:
+    runs-on: macos-15
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout WebDriverAgent
+        uses: actions/checkout@v4
+        with:
+          repository: appium/WebDriverAgent
+          ref: master
+          submodules: recursive
+          path: wda
+
+      - name: Toolchain
+        run: |
+          xcodebuild -version
+          xcrun --sdk iphoneos --show-sdk-version
+          sw_vers
+
+      - name: Build for testing
+        working-directory: wda
+        run: |
+          set -x
+          xcodebuild build-for-testing \
+            -project WebDriverAgent.xcodeproj \
+            -scheme WebDriverAgentRunner \
+            -sdk iphoneos \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath "$GITHUB_WORKSPACE/DerivedData" \
+            IPHONEOS_DEPLOYMENT_TARGET='${{ github.event.inputs.deployment_target }}' \
+            PRODUCT_BUNDLE_IDENTIFIER='${{ github.event.inputs.bundle_id }}' \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            ARCHS=arm64 \
+            ONLY_ACTIVE_ARCH=NO \
+            -quiet
+
+      - name: Package IPA
+        run: |
+          set -euo pipefail
+          APP=$(find "$GITHUB_WORKSPACE/DerivedData" -name 'WebDriverAgentRunner-Runner.app' -type d | head -1)
+          echo "APP=$APP"
+          if [ -z "$APP" ]; then echo '::error::WebDriverAgentRunner-Runner.app not found'; exit 1; fi
+          /usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist" || true
+          file "$APP/WebDriverAgentRunner-Runner" || true
+          lipo -info "$APP/WebDriverAgentRunner-Runner" || true
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          zip -qry WebDriverAgent.ipa Payload
+          ls -lh WebDriverAgent.ipa
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: WebDriverAgent-unsigned
+          path: WebDriverAgent.ipa
+          if-no-files-found: error
+          retention-days: 30
